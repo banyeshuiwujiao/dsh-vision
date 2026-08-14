@@ -4,7 +4,7 @@
 // text-only main model needs — a numbered inventory (map), answers and
 // verbatim text (read), and targeted crops (zoom).
 
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
@@ -13,7 +13,7 @@ import { parseElements, parseRegion, positionLabel } from './bbox.js'
 import { normToPx, pxToNormOfOriginal } from './coords.js'
 import { regionFor } from './crop.js'
 import { imageDiff } from './diff.js'
-import { encodePng, decodePng, PngError } from './png.js'
+import { encodePng, decodePng } from './png.js'
 import { readImageDims, prepareUpload, prepareCropUpload, ImageError } from './preprocess.js'
 import { checkPrompt, mapPrompt, readAskPrompt, readStripPrompt, readTranscribePrompt, zoomPrompt } from './prompts.js'
 import { VisualMemory, RegistryError } from './registry.js'
@@ -47,8 +47,10 @@ export interface Verdict {
 export function parseVerdicts(text: string, claims: string[]): Verdict[] {
   const cleaned = text.trim().replace(/^```(?:json)?\s*|\s*```$/g, '').trim()
   let items: unknown[] | null = null
+  let structured = false
   try {
     const payload: unknown = JSON.parse(cleaned)
+    structured = true
     if (Array.isArray(payload)) items = payload
     else if (payload !== null && typeof payload === 'object') {
       const record = payload as Record<string, unknown>
@@ -62,6 +64,7 @@ export function parseVerdicts(text: string, claims: string[]): Verdict[] {
     items = []
     const pattern = /\{[^{}]*["']?(?:claim|verdict|reason)["']?[^{}]*\}/g
     for (const block of cleaned.matchAll(pattern)) {
+      structured = true
       const chunk = block[0]
       const pick = (key: string): string => {
         const match = chunk.match(new RegExp(`["']?${key}["']?\\s*:\\s*["']([^"']+)["']`))
@@ -70,22 +73,27 @@ export function parseVerdicts(text: string, claims: string[]): Verdict[] {
       items.push({ claim: pick('claim'), verdict: pick('verdict'), reason: pick('reason') })
     }
   }
+  if (!structured) {
+    throw new Error('vision API did not return a parseable verdict list')
+  }
   const verdicts: Verdict[] = []
-  for (let index = 0; index < items.length; index++) {
-    const item = items[index]
+  for (const item of items) {
     if (item === null || typeof item !== 'object') continue
     const record = item as Record<string, unknown>
     const rawVerdict = typeof record.verdict === 'string' ? record.verdict.toLowerCase() : ''
     if (!VERDICT_VALUES.includes(rawVerdict as (typeof VERDICT_VALUES)[number])) continue
-    const claim = typeof record.claim === 'string' && record.claim.trim() ? record.claim.trim() : (claims[index] ?? '')
+    // A verdict must carry its own claim. Never bind positionally: a verdict
+    // without a claim would otherwise confirm a claim the model never
+    // evaluated — the worst failure mode for a verification tool.
+    const claim = typeof record.claim === 'string' ? record.claim.trim() : ''
     if (!claim) continue
     const reason = typeof record.reason === 'string' ? record.reason.trim() : ''
     verdicts.push({ claim, verdict: rawVerdict as Verdict['verdict'], reason })
   }
-  // Claims the model never addressed become honest "unverifiable" rows.
-  if (verdicts.length === 0) {
-    throw new Error('vision API did not return a parseable verdict list')
-  }
+  // Claims the model never addressed become honest "unverifiable" rows. When
+  // the reply parsed structurally but every row was dropped (missing claim or
+  // invalid verdict), everything lands as unverifiable — never a false
+  // confirmation. Only an entirely unparseable reply throws.
   const seen = new Set(verdicts.map((verdict) => verdict.claim))
   for (const claim of claims) {
     if (!seen.has(claim)) verdicts.push({ claim, verdict: 'unverifiable', reason: 'the vision model did not address this claim' })
@@ -161,8 +169,10 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
         return text(lines.join('\n'))
       },
     },
-    isConcurrencySafe: () => true,
-    async execute(args) {
+    // NOTE: no isConcurrencySafe here — vision_map writes the shared registry,
+    // so concurrent maps of the same image would race (last-wins) and stale
+    // ids could leak into vision_zoom. It stays exclusive by default.
+    async execute(args, exec) {
       try {
         const originalDims = readImageDims(args.image)
         const maxItems = args.maxItems ?? 30
@@ -174,6 +184,7 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
         }
         const answer = await callVision(vision, {
           task: 'map',
+          signal: exec.signal,
           prompt: mapPrompt({ focus: args.focus, maxItems, lang: vision.lang }),
           images: [{ dataUrl: prepared.dataUrl }],
           jsonMode: true,
@@ -202,14 +213,19 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
             y2: box.y2,
           }
         })
-        // Annotated proof: draw the boxes on the original pixels.
+        // Annotated proof: draw the boxes on the original pixels. Never
+        // overwrites an existing file — the proof belongs to the map that
+        // first wrote it.
         let annotatedPath = ''
         if (args.annotate !== false && args.image.toLowerCase().endsWith('.png')) {
           try {
-            const original = decodePng(readFileSync(args.image))
-            const drawn = drawBoxes(original, elements.map((element) => ({ x1: element.x1, y1: element.y1, x2: element.x2, y2: element.y2 })))
-            annotatedPath = join(dirname(args.image), `${basename(args.image, '.png')}.annotated.png`)
-            writeFileSync(annotatedPath, encodePng(drawn))
+            const stem = basename(args.image).replace(/\.png$/i, '')
+            annotatedPath = join(dirname(args.image), `${stem}.annotated.png`)
+            if (!existsSync(annotatedPath)) {
+              const original = decodePng(readFileSync(args.image))
+              const drawn = drawBoxes(original, elements.map((element) => ({ x1: element.x1, y1: element.y1, x2: element.x2, y2: element.y2 })))
+              writeFileSync(annotatedPath, encodePng(drawn))
+            }
           } catch {
             annotatedPath = '' // annotation is best-effort; the inventory stands
           }
@@ -249,13 +265,14 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
       },
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       try {
         if (args.mode === 'ask') {
           if (!args.question) throw new Error('vision_read mode "ask" requires a question')
           const prepared = args.images.map((path) => prepareUpload(path, maxEdge))
           const answer = await callVision(vision, {
             task: 'read',
+            signal: exec.signal,
             prompt: readAskPrompt(args.question, args.images.length, vision.lang),
             images: prepared.map((upload) => ({ dataUrl: upload.dataUrl })),
             maxTokens: 4096,
@@ -279,6 +296,7 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
                 const prepared = prepareCropUpload(path, { x1: 0, y1: strip.y1, x2: dims.width, y2: strip.y2 }, { maxEdge })
                 const part = await callVision(vision, {
                   task: 'read',
+                  signal: exec.signal,
                   prompt: readStripPrompt(strip.index, strip.count),
                   images: [{ dataUrl: prepared.dataUrl }],
                   maxTokens: 2048,
@@ -296,6 +314,7 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
             const prepared = prepareUpload(path, maxEdge)
             const answer = await callVision(vision, {
               task: 'read',
+              signal: exec.signal,
               prompt: readTranscribePrompt(),
               images: [{ dataUrl: prepared.dataUrl }],
               maxTokens: 4096,
@@ -351,7 +370,7 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
       },
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       try {
         const scale = args.scale ?? 1
         if (!Number.isInteger(scale) || scale < 1 || scale > 8) throw new Error('scale must be an integer between 1 and 8')
@@ -369,6 +388,7 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
         const prepared = prepareCropUpload(args.image, box, { scale, maxEdge })
         const answer = await callVision(vision, {
           task: 'zoom',
+          signal: exec.signal,
           prompt: zoomPrompt(args.question, vision.lang),
           images: [{ dataUrl: prepared.dataUrl }],
           maxTokens: 4096,
@@ -414,11 +434,12 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
       },
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       try {
         const prepared = prepareUpload(args.image, maxEdge)
         const answer = await callVision(vision, {
           task: 'check',
+          signal: exec.signal,
           prompt: checkPrompt(args.claims),
           images: [{ dataUrl: prepared.dataUrl }],
           jsonMode: true,
@@ -475,9 +496,9 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
       },
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       try {
-        const result = imageDiff(args.a, args.b, args.tolerance ?? 8)
+        const result = imageDiff(args.a, args.b, Math.max(0, args.tolerance ?? 8))
         return {
           percent: result.percent,
           changedPixels: result.changedPixels,

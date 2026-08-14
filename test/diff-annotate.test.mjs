@@ -46,6 +46,13 @@ test('blockDiff respects the per-channel tolerance', () => {
   assert.equal(blockDiff(a, b, 2).changedPixels, 16 * 16)
 })
 
+test('blockDiff counts transparency-only changes', () => {
+  const a = decodePng(solidPng(8, 8, [100, 100, 100, 255]))
+  const b = decodePng(solidPng(8, 8, [100, 100, 100, 0])) // identical RGB, different alpha
+  const result = blockDiff(a, b)
+  assert.equal(result.changedPixels, 8 * 8)
+})
+
 test('imageDiff compares the overlap when sizes differ', () => {
   writeFileSync(aPath, solidPng(32, 32, [1, 2, 3, 255]))
   writeFileSync(bPath, solidPng(48, 32, [1, 2, 3, 255]))

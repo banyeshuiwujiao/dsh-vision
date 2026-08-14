@@ -31,6 +31,8 @@ export interface VisionCallOptions {
     jsonMode?: boolean;
     /** Force temperature 0 (grounding, transcription). */
     deterministic?: boolean;
+    /** Cancellation from the caller (fused with the per-request timeout). */
+    signal?: AbortSignal;
 }
 export declare class VisionError extends Error {
     constructor(message: string);

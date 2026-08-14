@@ -20,6 +20,22 @@ test('normToPx clamps out-of-range values into the original image', () => {
   assert.deepEqual(box, { x1: 0, y1: 0, x2: 800, y2: 600 })
 })
 
+test('normToPx maps through the viewBox span when the upload was downscaled', () => {
+  // The model saw a 400x300 rendition of an 800x600 original (2x downscale).
+  const view = { viewBox: { x1: 0, y1: 0, x2: 800, y2: 600 }, viewDims: { width: 400, height: 300 } }
+  const whole = normToPx({ x1: 0, y1: 0, x2: 1000, y2: 1000 }, view)
+  assert.deepEqual(whole, { x1: 0, y1: 0, x2: 800, y2: 600 })
+  const half = normToPx({ x1: 0, y1: 0, x2: 500, y2: 1000 }, view)
+  assert.deepEqual(half, { x1: 0, y1: 0, x2: 400, y2: 600 })
+})
+
+test('normToPx maps through the viewBox span when the crop was upscaled', () => {
+  // The model saw a 4x upscaled crop of a 100x100 region.
+  const view = { viewBox: { x1: 200, y1: 100, x2: 300, y2: 200 }, viewDims: { width: 400, height: 400 } }
+  const whole = normToPx({ x1: 0, y1: 0, x2: 1000, y2: 1000 }, view)
+  assert.deepEqual(whole, { x1: 200, y1: 100, x2: 300, y2: 200 })
+})
+
 test('px-norm-px roundtrip is stable', () => {
   const px = { x1: 123, y1: 45, x2: 678, y2: 512 }
   const norm = pxToNormOfOriginal(px, fullView.viewDims)

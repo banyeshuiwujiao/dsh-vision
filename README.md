@@ -152,14 +152,6 @@ $env:VISION_MODEL    = "qwen-vl-max-latest"
 - **结构化输出约束**：JSON 输出不设置 `max_tokens`（避免截断），grounding 与转写任务使用 temperature 0，响应做宽容解析（围栏代码、键别名、正则回退）与后处理（边界裁剪、IoU 去重、阅读顺序排序）
 - **确定性操作优先**：区域裁剪等像素操作在本地完成，不产生 API 成本
 
-## 路线图
-
-- **v1.2**（开发中）`vision_reground` 迭代精定位（同 ID 更紧的框，像素级 grounding）、`vision_locate` 单目标定位、`vision_chart` 图表转数值表格（采样聚合 + 弱格重读）、OCR 语言参数化
-- **v1.3** 注册表跨会话持久化 + 惊讶门控增量重标（只重标变化区域）、迷你评测套件（ScreenSpot / V\*Bench / OCRBench / ChartQA 子集，README 公布分数）
-- **v1.4+** 屏幕录制关键帧索引（视频理解）、Web UI 图片卡片（toolview slot）、GUI 操作闭环
-
-完整调研与设计依据见规划文档（18 篇论文 + 生态竞品分析）。
-
 ## 设计参考
 
 设计决策基于已发表研究：编号标注（Set-of-Mark）、由粗到细检索（V\*/SEAL）、声明验证（Woodpecker）、长图分片（Monkey / LLaVA-UHD）、归一化坐标（OS-Atlas）。论文列表与工程实践来源见 [REFERENCES.md](REFERENCES.md)。本插件为独立的 TypeScript 实现，未复用任何现有项目的代码或提示词。（非佬，拿ai做的玩具，凑个热闹（一开始准备装agent-vision-toolkit的，但是我看好多人说有bug，后面就想着基于这个改成dsh插件，再后面一想，都准备做了，就让ai调研一下做了个玩具，也算是个人第一个项目了😭））。

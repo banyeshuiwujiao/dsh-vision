@@ -36,6 +36,16 @@ test('parseVerdicts throws on garbage', () => {
   assert.throws(() => parseVerdicts('nothing useful', ['a claim']), /parseable verdict/)
 })
 
+test('parseVerdicts never binds a claim-less verdict positionally', () => {
+  // The worst failure mode: the model omits claim fields; a positional fallback
+  // would "confirm" claims the model never evaluated.
+  const reply = '{"verdicts": [{"verdict": "supported", "reason": "the grass is green"}]}'
+  const verdicts = parseVerdicts(reply, ['the sky is red', 'the grass is green'])
+  assert.equal(verdicts.length, 2)
+  for (const verdict of verdicts) assert.equal(verdict.verdict, 'unverifiable')
+  assert.deepEqual(verdicts.map((verdict) => verdict.claim).sort(), ['the grass is green', 'the sky is red'])
+})
+
 const config = {
   apiKey: 'k',
   baseURL: 'https://primary.test',

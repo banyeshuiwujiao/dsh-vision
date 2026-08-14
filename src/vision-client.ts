@@ -45,6 +45,8 @@ export interface VisionCallOptions {
   jsonMode?: boolean
   /** Force temperature 0 (grounding, transcription). */
   deterministic?: boolean
+  /** Cancellation from the caller (fused with the per-request timeout). */
+  signal?: AbortSignal
 }
 
 export class VisionError extends Error {
@@ -103,6 +105,7 @@ export async function callVision(config: VisionConfig, options: VisionCallOption
   const temperature = useJsonMode || options.deterministic === true || options.task === 'map' || options.task === 'check' ? 0 : undefined
   const failures: string[] = []
   for (const endpoint of endpointList(config, options.task)) {
+    if (options.signal?.aborted) break
     try {
       return await callEndpoint(endpoint, config.timeoutMs, options, temperature, useJsonMode)
     } catch (error) {
@@ -130,20 +133,25 @@ async function callEndpoint(endpoint: VisionEndpoint, timeoutMs: number, options
   if (temperature !== undefined) payload.temperature = temperature
   if (!useJsonMode && options.maxTokens !== undefined) payload.max_tokens = options.maxTokens
 
+  let jsonModeRetried = false
   for (let attempt = 0; ; attempt++) {
+    if (options.signal?.aborted) throw new VisionError('cancelled')
     const headers: Record<string, string> = { 'Content-Type': 'application/json', Authorization: `Bearer ${endpoint.apiKey}` }
-    if (useJsonMode && attempt < 1) payload.response_format = { type: 'json_object' }
+    // response_format survives transient retries; it is dropped ONLY after the
+    // endpoint rejects it explicitly (the 400 path below).
+    if (useJsonMode && !jsonModeRetried) payload.response_format = { type: 'json_object' }
     else delete payload.response_format
     try {
       const response = await fetch(`${baseURL}/chat/completions`, {
         method: 'POST',
         headers,
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
       })
       if (!response.ok) {
         // Some endpoints reject response_format outright: retry once without it.
-        if (response.status === 400 && useJsonMode && payload.response_format !== undefined && attempt < 1) {
+        if (response.status === 400 && useJsonMode && !jsonModeRetried) {
+          jsonModeRetried = true
           await new Promise((resolve) => setTimeout(resolve, 500))
           continue
         }

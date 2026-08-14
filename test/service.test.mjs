@@ -40,7 +40,12 @@ test('apply registers exactly the five v1.1 tools', () => {
     assert.equal(typeof tool.execute, 'function')
     assert.equal(typeof tool.output.render, 'function')
     assert.ok(typeof tool.description === 'string' && tool.description.length > 0)
-    assert.equal(tool.isConcurrencySafe(validArgs[tool.name]), true, `${tool.name} must be concurrency-safe`)
+    // vision_map writes the shared registry and stays exclusive; the rest are read-only.
+    if (tool.name === 'vision_map') {
+      assert.equal(tool.isConcurrencySafe, undefined, 'vision_map must NOT opt into concurrency')
+    } else {
+      assert.equal(tool.isConcurrencySafe(validArgs[tool.name]), true, `${tool.name} must be concurrency-safe`)
+    }
   }
 })
 

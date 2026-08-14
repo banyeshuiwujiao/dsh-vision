@@ -82,6 +82,9 @@ export function decodePng(input: Uint8Array): PngImage {
     }
   }
   if (!width || !height) throw new PngError('PNG has no IHDR')
+  if (width < 1 || height < 1 || width > 32768 || height > 32768) {
+    throw new PngError(`unsupported PNG dimensions ${width}x${height}`)
+  }
   if (bitDepth !== 8) throw new PngError(`unsupported PNG bit depth ${bitDepth} (only 8-bit)`)
   if (colorType !== 0 && colorType !== 2 && colorType !== 6) {
     throw new PngError(`unsupported PNG color type ${colorType} (only grayscale, RGB, RGBA)`)
@@ -90,7 +93,9 @@ export function decodePng(input: Uint8Array): PngImage {
 
   const channels = colorType === 0 ? 1 : colorType === 2 ? 3 : 4
   const stride = width * channels
-  const raw = inflateSync(Buffer.concat(idat))
+  // Deflate-bomb guard: a legitimate stream can never exceed the declared
+  // image size plus a small per-scanline margin.
+  const raw = inflateSync(Buffer.concat(idat), { maxOutputLength: (stride + 1) * height + stride })
   const data = new Uint8Array(width * height * 4)
   const prev = new Uint8Array(stride)
   let pos = 0

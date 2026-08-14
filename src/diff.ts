@@ -45,7 +45,6 @@ export function blockDiff(a: PngImage, b: PngImage, tolerance = 8, blockSize = 1
   let changedPixels = 0
   const blockCounts = new Map<number, number>()
   const blockW = Math.max(1, Math.ceil(width / blockSize))
-  const blockH = Math.max(1, Math.ceil(height / blockSize))
   const blockKey = (bx: number, by: number) => by * blockW + bx
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -53,7 +52,8 @@ export function blockDiff(a: PngImage, b: PngImage, tolerance = 8, blockSize = 1
       const dr = Math.abs(a.data[i] - b.data[i])
       const dg = Math.abs(a.data[i + 1] - b.data[i + 1])
       const db = Math.abs(a.data[i + 2] - b.data[i + 2])
-      if (Math.max(dr, dg, db) > tolerance) {
+      const da = Math.abs(a.data[i + 3] - b.data[i + 3])
+      if (Math.max(dr, dg, db, da) > tolerance) {
         changedPixels++
         const key = blockKey(Math.floor(x / blockSize), Math.floor(y / blockSize))
         blockCounts.set(key, (blockCounts.get(key) ?? 0) + 1)
