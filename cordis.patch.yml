@@ -1,0 +1,18 @@
+# dsh-vision bundle patch: insert the visual working memory service row.
+# The service registers its tools on the host `tools` registry at apply
+# time and its visual-memory skill on `skills` when that service exists.
+# Configure through the row's `config` (overrides environment):
+#
+# - id: dsh-vision
+#   name: 'dsh-vision'
+#   config:
+#     apiKey: 'sk-...'          # or env VISION_API_KEY
+#     baseURL: 'https://...'    # OpenAI-compatible endpoint, or env VISION_BASE_URL
+#     model: 'qwen-vl-max-latest'   # primary vision model, or env VISION_MODEL
+#     modelMap: ''              # per-task overrides: modelMap / modelRead / modelZoom
+#     lang: zh                  # vision answer language: zh | en
+#     maxEdge: 2048             # upload long-edge pixel cap
+#
+- insert:
+    - id: dsh-vision
+      name: 'dsh-vision'

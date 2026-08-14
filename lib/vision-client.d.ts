@@ -1,0 +1,31 @@
+export type VisionTask = 'map' | 'read' | 'zoom' | 'check';
+export interface VisionConfig {
+    apiKey: string;
+    baseURL: string;
+    /** Primary model. */
+    model: string;
+    /** Per-task overrides; empty means use the primary. */
+    modelMap: string;
+    modelRead: string;
+    modelZoom: string;
+    modelCheck: string;
+    lang: string;
+    timeoutMs: number;
+}
+export interface VisionImage {
+    dataUrl: string;
+}
+export interface VisionCallOptions {
+    task: VisionTask;
+    prompt: string;
+    images: VisionImage[];
+    /** Omitted entirely when jsonMode (truncated JSON is worse than none). */
+    maxTokens?: number;
+    jsonMode?: boolean;
+    /** Force temperature 0 (grounding, transcription). */
+    deterministic?: boolean;
+}
+export declare class VisionError extends Error {
+    constructor(message: string);
+}
+export declare function callVision(config: VisionConfig, options: VisionCallOptions): Promise<string>;
