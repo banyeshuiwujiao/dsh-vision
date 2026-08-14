@@ -60,6 +60,23 @@ Colors, states, styling, or text that no tool call confirmed do not exist
 in your answer. A vision model's prose is evidence about what it saw, not a
 guarantee of pixel-level facts; treat exact values with the same care.
 
+## Verify before asserting
+
+Before you state a visual fact you have not confirmed yourself — a color, a
+state, the presence of an element — run `vision_check` with the claim as a
+plain sentence. Treat "contradicted" as a correction and "unverifiable" as
+a reason to zoom in and re-ask. The registry is your evidence ledger: every
+mapped element is a claim you can already cite.
+
+## Diff before describing a change
+
+"What changed between these two?" is a `vision_diff` question, not a
+`vision_read` question. A small badge or a shifted pixel is a rounding error
+to a vision model and exact to the diff — run the diff first to get the
+worst regions, then zoom into those boxes to read what the change actually
+is. After editing a page or UI, diff the new capture against the reference
+to measure how close it is.
+
 ## Read by mode
 
 - `mode: "transcribe"` — verbatim text extraction. Tall pages are tiled into
@@ -87,6 +104,8 @@ guarantee of pixel-exactness — the model works on a scaled grid.
 | What elements exist in this image, and where? | `vision_map` |
 | What does one element say / show? | `vision_zoom` |
 | What does the whole image say / what text is in it? | `vision_read` |
+| Is a stated visual fact actually visible? | `vision_check` |
+| Where exactly do two images differ? | `vision_diff` |
 
 ## Task patterns
 
@@ -95,5 +114,8 @@ guarantee of pixel-exactness — the model works on a scaled grid.
 - **Transcription**: `vision_read` transcribe on the file; long pages merge
   automatically.
 - **Comparison**: `vision_read` ask with all paths in one call.
+- **Verification**: claim → `vision_check` → zoom the "unverifiable" ones.
+- **Change iteration**: `vision_diff` → zoom the worst regions → fix → diff
+  again until the percentage converges.
 
 Design references: see REFERENCES.md in the plugin package.

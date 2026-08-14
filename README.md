@@ -87,13 +87,15 @@ $env:VISION_MODEL    = "qwen-vl-max-latest"
 
 | 工具 | 主要参数 | 说明 |
 |---|---|---|
-| `vision_map` | `image`\*, `focus`, `region`, `maxItems` | 生成编号元素清单并写入视觉工作记忆；`focus` 按种类过滤（如 `"buttons"`），`region` 限定标注范围（坐标映射回原图） |
+| `vision_map` | `image`\*, `focus`, `region`, `maxItems`, `annotate` | 生成编号元素清单（ID + 标签 + 逐字文字 + 置信度 + 像素框）并写入视觉工作记忆；`focus` 按种类过滤，`region` 限定标注范围；`annotate` 输出带框标注的证明图（`<stem>.annotated.png`） |
 | `vision_read` | `images`\*, `mode`\* (`ask`/`transcribe`), `question` | `ask` 模式回答针对性问题（多图单次调用对比）；`transcribe` 模式逐字提取全部可见文本，长图自动分片合并 |
 | `vision_zoom` | `image`\*, `question`\*, `ref`/`region`（二选一）, `scale` | 定向检查单个元素；`ref` 引用标注结果（如 `"7"` 或 `"7@imageId"`），`region` 指定原始像素盒；`scale` 2-8 倍最近邻放大 |
+| `vision_check` | `image`\*, `claims`\* | 声明验证：将自然语言断言与图像证据比对，逐条返回 supported / contradicted / unverifiable + 理由 |
+| `vision_diff` | `a`\*, `b`\*, `tolerance` | 像素级对比两张 PNG（本地确定性，零 API 成本）：差异百分比 + 最差区域框，支持迭代裁决（"6.04% → 0%"） |
 
 `*` 为必填参数。
 
-随包注册的 `visual-memory` 技能提供工作流指导：标注优先、按编号引用、充分性规则（信息不足时要求定向检查而非推测）、禁止编造视觉细节。
+随包注册的 `visual-memory` 技能提供工作流指导：标注优先、按编号引用、充分性规则（信息不足时要求定向检查而非推测）、断言前验证、改动用 diff 量化、禁止编造视觉细节。
 
 ## 配置参考
 
@@ -107,6 +109,8 @@ $env:VISION_MODEL    = "qwen-vl-max-latest"
 | `VISION_MODEL_MAP` | | `vision_map` 任务专用模型（空则使用主模型） |
 | `VISION_MODEL_READ` | | `vision_read` 任务专用模型 |
 | `VISION_MODEL_ZOOM` | | `vision_zoom` 任务专用模型 |
+| `VISION_MODEL_CHECK` | | `vision_check` 任务专用模型 |
+| `VISION_FALLBACKS` | | 回退端点链（JSON 数组，如 `[{"baseURL":"https://open.bigmodel.cn/api/paas/v4","apiKey":"...","model":"glm-4v-flash"}]`）——主端点失败后依次降级，可把免费端点排后面省成本 |
 | `VISION_LANG` | | 视觉输出语言：`zh` / `en`（默认 `zh`） |
 
 ### profile 配置（优先级高于环境变量）
@@ -125,6 +129,17 @@ $env:VISION_MODEL    = "qwen-vl-max-latest"
 ```
 
 修改后重启生效。配置缺失时工具返回明确错误提示，不会静默失败。
+
+## 隐私说明（数据传哪了）
+
+本插件不截屏、不扫描、不自动上传任何东西：
+
+- **只发送你显式提供的图片**——聊天附件或你给出的文件路径
+- **只发往你配置的端点**——`VISION_BASE_URL`（及回退链里的端点），不经过任何第三方中转
+- **零本地缓存外泄**——视觉工作记忆是进程内缓存，重启即清空；标注证明图（`<stem>.annotated.png`）写在你图片所在的同一目录，由你处置
+- **完全本地化可选**——把 `VISION_BASE_URL` 指向本机 OpenAI 兼容服务（Ollama / LM Studio + Qwen-VL 等），图片不离开这台机器
+
+确定性工具（`vision_diff`、裁剪、放大、分片）在本地完成，不产生任何网络请求。
 
 ## 设计决策
 

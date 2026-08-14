@@ -4,14 +4,18 @@
 // text-only main model needs — a numbered inventory (map), answers and
 // verbatim text (read), and targeted crops (zoom).
 
-import { basename } from 'node:path'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { drawBoxes } from './annotate.js'
 import { parseElements, parseRegion, positionLabel } from './bbox.js'
 import { normToPx, pxToNormOfOriginal } from './coords.js'
 import { regionFor } from './crop.js'
+import { imageDiff } from './diff.js'
+import { encodePng, decodePng, PngError } from './png.js'
 import { readImageDims, prepareUpload, prepareCropUpload, ImageError } from './preprocess.js'
-import { mapPrompt, readAskPrompt, readStripPrompt, readTranscribePrompt, zoomPrompt } from './prompts.js'
+import { checkPrompt, mapPrompt, readAskPrompt, readStripPrompt, readTranscribePrompt, zoomPrompt } from './prompts.js'
 import { VisualMemory, RegistryError } from './registry.js'
 import { mergeStrips, planStrips, shouldTile, unreadableStrip } from './tile.js'
 import { callVision, VisionError, type VisionConfig } from './vision-client.js'
@@ -31,6 +35,64 @@ function errorText(error: unknown): string {
   return String(error)
 }
 
+const VERDICT_VALUES = ['supported', 'contradicted', 'unverifiable'] as const
+
+export interface Verdict {
+  claim: string
+  verdict: 'supported' | 'contradicted' | 'unverifiable'
+  reason: string
+}
+
+/** Tolerant parse of the vision_check verdict reply (fences, wrapper keys). */
+export function parseVerdicts(text: string, claims: string[]): Verdict[] {
+  const cleaned = text.trim().replace(/^```(?:json)?\s*|\s*```$/g, '').trim()
+  let items: unknown[] | null = null
+  try {
+    const payload: unknown = JSON.parse(cleaned)
+    if (Array.isArray(payload)) items = payload
+    else if (payload !== null && typeof payload === 'object') {
+      const record = payload as Record<string, unknown>
+      if (Array.isArray(record.verdicts)) items = record.verdicts
+    }
+  } catch {
+    // fall through to the tolerant pickups below
+  }
+  if (items === null) {
+    // Regex fallback: {claim|verdict|reason} objects, quoted or not.
+    items = []
+    const pattern = /\{[^{}]*["']?(?:claim|verdict|reason)["']?[^{}]*\}/g
+    for (const block of cleaned.matchAll(pattern)) {
+      const chunk = block[0]
+      const pick = (key: string): string => {
+        const match = chunk.match(new RegExp(`["']?${key}["']?\\s*:\\s*["']([^"']+)["']`))
+        return match?.[1] ?? ''
+      }
+      items.push({ claim: pick('claim'), verdict: pick('verdict'), reason: pick('reason') })
+    }
+  }
+  const verdicts: Verdict[] = []
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index]
+    if (item === null || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    const rawVerdict = typeof record.verdict === 'string' ? record.verdict.toLowerCase() : ''
+    if (!VERDICT_VALUES.includes(rawVerdict as (typeof VERDICT_VALUES)[number])) continue
+    const claim = typeof record.claim === 'string' && record.claim.trim() ? record.claim.trim() : (claims[index] ?? '')
+    if (!claim) continue
+    const reason = typeof record.reason === 'string' ? record.reason.trim() : ''
+    verdicts.push({ claim, verdict: rawVerdict as Verdict['verdict'], reason })
+  }
+  // Claims the model never addressed become honest "unverifiable" rows.
+  if (verdicts.length === 0) {
+    throw new Error('vision API did not return a parseable verdict list')
+  }
+  const seen = new Set(verdicts.map((verdict) => verdict.claim))
+  for (const claim of claims) {
+    if (!seen.has(claim)) verdicts.push({ claim, verdict: 'unverifiable', reason: 'the vision model did not address this claim' })
+  }
+  return verdicts
+}
+
 /** Generic object output schema with exactly the given properties. */
 // Schemas are inlined at each tool call site so the const generic inference
 // captures literal types (a helper typed as Record<string, unknown> breaks
@@ -43,12 +105,13 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
   const map = defineTool({
     name: 'vision_map',
     description:
-      'Annotate an image into a numbered inventory: every distinct interactive or informative element (buttons, inputs, icons, headings, banners) gets an id, a label, and its pixel box, and the list is kept in visual working memory. Map first: before reasoning about what an image contains or where something is, map it, then refer to elements by id ("element 7"), never by vague description. Optionally filter with `focus` (one kind only), or annotate only inside `region`. Boxes are not pixel-exact (model grid scaled to the image) — accurate enough to crop or zoom. A different file means a new map: ids never carry over between images.',
+      'Annotate an image into a numbered inventory: every distinct interactive or informative element (buttons, inputs, icons, headings, banners) gets an id, a label, its verbatim visible text, a confidence score, and its pixel box, and the list is kept in visual working memory. Map first: before reasoning about what an image contains or where something is, map it, then refer to elements by id ("element 7"), never by vague description. Boxes and text let you reason spatially and read elements without extra vision calls; use vision_zoom when a detail is still not legible. Optionally filter with `focus` (one kind only), or annotate only inside `region`. Boxes are not pixel-exact (model grid scaled to the image) — accurate enough to crop or zoom. A different file means a new map: ids never carry over between images.',
     parameters: {
       image: { type: 'string', required: true, description: 'Absolute image path (PNG/JPEG/GIF/WebP).' },
       focus: { type: 'string', description: 'Optional element kind to list only, e.g. "buttons" or "error messages".' },
       region: { type: 'string', description: 'Optional pixel box "X1,Y1,X2,Y2" to annotate only inside (PNG only). Results stay in original-image coordinates.' },
       maxItems: { type: 'integer', description: 'Maximum elements to list (default 30).' },
+      annotate: { type: 'boolean', description: 'Also write <stem>.annotated.png with boxes drawn on the image (default true; PNG only).' },
     },
     output: {
       schema: {
@@ -58,6 +121,7 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
           imageId: { type: 'string' },
           width: { type: 'integer' },
           height: { type: 'integer' },
+          annotatedPath: { type: 'string' },
           elements: {
             type: 'array',
             items: {
@@ -66,6 +130,8 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
               properties: {
                 id: { type: 'integer' },
                 label: { type: 'string' },
+                text: { type: 'string' },
+                confidence: { type: 'number' },
                 position: { type: 'string' },
                 x1: { type: 'integer' },
                 y1: { type: 'integer' },
@@ -77,15 +143,25 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
         },
       },
       render: (_args, value) => {
-        const result = value as { imageId: string; width: number; height: number; elements: Array<{ id: number; label: string; position: string; x1: number; y1: number; x2: number; y2: number }> }
-        const lines = result.elements.map(
-          (element) => `${element.id}. [${element.position}] ${element.label}  x1: ${element.x1}, y1: ${element.y1}, x2: ${element.x2}, y2: ${element.y2}`,
-        )
+        const result = value as {
+          imageId: string
+          annotatedPath: string
+          width: number
+          height: number
+          elements: Array<{ id: number; label: string; text?: string; confidence?: number; position: string; x1: number; y1: number; x2: number; y2: number }>
+        }
+        const lines = result.elements.map((element) => {
+          const quote = element.text ? ` "${element.text}"` : ''
+          const confidence = element.confidence !== undefined ? ` (conf ${element.confidence.toFixed(2)})` : ''
+          return `${element.id}. [${element.position}] ${element.label}${quote}${confidence}  x1: ${element.x1}, y1: ${element.y1}, x2: ${element.x2}, y2: ${element.y2}`
+        })
         if (lines.length === 0) lines.push('no elements detected')
         lines.push(`visual memory updated: refs 1-${result.elements.length} valid for ${result.imageId} — use vision_zoom ref "N" to inspect one element.`)
+        if (result.annotatedPath) lines.push(`annotated proof: ${result.annotatedPath}`)
         return text(lines.join('\n'))
       },
     },
+    isConcurrencySafe: () => true,
     async execute(args) {
       try {
         const originalDims = readImageDims(args.image)
@@ -107,14 +183,38 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
         const regions = parsed.map((element) => ({
           id: element.id,
           label: element.label,
+          ...(element.text !== undefined ? { text: element.text } : {}),
+          ...(element.confidence !== undefined ? { confidence: element.confidence } : {}),
           norm: pxToNormOfOriginal(normToPx(element.norm, prepared.view), originalDims),
         }))
         memory.store(args.image, imageId, originalDims.width, originalDims.height, regions)
         const elements = parsed.map((element) => {
           const box = normToPx(element.norm, prepared.view)
-          return { id: element.id, label: element.label, position: positionLabel(box, originalDims.width, originalDims.height), x1: box.x1, y1: box.y1, x2: box.x2, y2: box.y2 }
+          return {
+            id: element.id,
+            label: element.label,
+            text: element.text ?? '',
+            confidence: element.confidence ?? 0,
+            position: positionLabel(box, originalDims.width, originalDims.height),
+            x1: box.x1,
+            y1: box.y1,
+            x2: box.x2,
+            y2: box.y2,
+          }
         })
-        return { imageId, width: originalDims.width, height: originalDims.height, elements }
+        // Annotated proof: draw the boxes on the original pixels.
+        let annotatedPath = ''
+        if (args.annotate !== false && args.image.toLowerCase().endsWith('.png')) {
+          try {
+            const original = decodePng(readFileSync(args.image))
+            const drawn = drawBoxes(original, elements.map((element) => ({ x1: element.x1, y1: element.y1, x2: element.x2, y2: element.y2 })))
+            annotatedPath = join(dirname(args.image), `${basename(args.image, '.png')}.annotated.png`)
+            writeFileSync(annotatedPath, encodePng(drawn))
+          } catch {
+            annotatedPath = '' // annotation is best-effort; the inventory stands
+          }
+        }
+        return { imageId, width: originalDims.width, height: originalDims.height, annotatedPath, elements }
       } catch (error) {
         throw new Error(errorText(error))
       }
@@ -148,6 +248,7 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
         return text(result.tiled ? `${result.answer}\n(transcribed from ${result.strips} overlapping strips, merged top-to-bottom)` : result.answer)
       },
     },
+    isConcurrencySafe: () => true,
     async execute(args) {
       try {
         if (args.mode === 'ask') {
@@ -249,6 +350,7 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
         return text(`${result.answer}\n(crop box: x1: ${result.box.x1}, y1: ${result.box.y1}, x2: ${result.box.x2}, y2: ${result.box.y2})`)
       },
     },
+    isConcurrencySafe: () => true,
     async execute(args) {
       try {
         const scale = args.scale ?? 1
@@ -278,5 +380,116 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
     },
   })
 
-  return [map, read, zoom]
+  // ── vision_check: claim verification (Woodpecker-lite) ──────────────────
+  const check = defineTool({
+    name: 'vision_check',
+    description:
+      'Verify plain-language claims against visual evidence in one image. Each claim gets a verdict: "supported" (directly visible), "contradicted" (the image shows the opposite), or "unverifiable" (too small, cut off, or outside the image). Use it before asserting visual facts you have not confirmed yourself — the vision model is instructed to prefer "unverifiable" over guessing.',
+    parameters: {
+      image: { type: 'string', required: true, description: 'Absolute image path.' },
+      claims: { type: 'array', items: { type: 'string' }, required: true, description: 'Plain sentences to verify, e.g. "the page shows a 404 error", "the button is red".' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          verdicts: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                claim: { type: 'string' },
+                verdict: { type: 'string' },
+                reason: { type: 'string' },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => {
+        const result = value as { verdicts: Verdict[] }
+        return text(result.verdicts.map((verdict) => `${verdict.verdict}: ${verdict.claim}${verdict.reason ? ` — ${verdict.reason}` : ''}`).join('\n'))
+      },
+    },
+    isConcurrencySafe: () => true,
+    async execute(args) {
+      try {
+        const prepared = prepareUpload(args.image, maxEdge)
+        const answer = await callVision(vision, {
+          task: 'check',
+          prompt: checkPrompt(args.claims),
+          images: [{ dataUrl: prepared.dataUrl }],
+          jsonMode: true,
+        })
+        return { verdicts: parseVerdicts(answer, args.claims) }
+      } catch (error) {
+        throw new Error(errorText(error))
+      }
+    },
+  })
+
+  // ── vision_diff: reference-vs-implementation pixel diff ─────────────────
+  const diff = defineTool({
+    name: 'vision_diff',
+    description:
+      'Diff two PNG images pixel by pixel (local, deterministic — no vision API) and return the overall difference percentage plus the worst differing regions as boxes. The iteration tool: after changing a page or UI, diff the new screenshot against the reference to measure how close it is, then zoom into the worst regions. A small badge or shifted pixel is a rounding error to a vision model and exact to this tool — diff first to get the boxes, then vision_read/vision_zoom those boxes to read what the change actually is.',
+    parameters: {
+      a: { type: 'string', required: true, description: 'Absolute PNG path of the first image (e.g. the reference).' },
+      b: { type: 'string', required: true, description: 'Absolute PNG path of the second image (e.g. the current screenshot).' },
+      tolerance: { type: 'integer', description: 'Per-channel difference that counts a pixel as changed (default 8).' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          percent: { type: 'number' },
+          changedPixels: { type: 'integer' },
+          totalPixels: { type: 'integer' },
+          overlapOnly: { type: 'boolean' },
+          regions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                x1: { type: 'integer' },
+                y1: { type: 'integer' },
+                x2: { type: 'integer' },
+                y2: { type: 'integer' },
+                changed: { type: 'integer' },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => {
+        const result = value as { percent: number; changedPixels: number; totalPixels: number; overlapOnly: boolean; regions: Array<{ x1: number; y1: number; x2: number; y2: number; changed: number }> }
+        const lines = [
+          `${result.percent.toFixed(2)}% pixels differ (${result.changedPixels} of ${result.totalPixels})${result.overlapOnly ? ' — sizes differed, compared the overlapping region' : ''}`,
+          ...result.regions.map((region) => `worst region x1: ${region.x1}, y1: ${region.y1}, x2: ${region.x2}, y2: ${region.y2} (${region.changed} changed pixels)`),
+        ]
+        return text(lines.join('\n'))
+      },
+    },
+    isConcurrencySafe: () => true,
+    async execute(args) {
+      try {
+        const result = imageDiff(args.a, args.b, args.tolerance ?? 8)
+        return {
+          percent: result.percent,
+          changedPixels: result.changedPixels,
+          totalPixels: result.totalPixels,
+          overlapOnly: result.overlapOnly,
+          regions: result.blocks.map((block) => ({ x1: block.x1, y1: block.y1, x2: block.x2, y2: block.y2, changed: block.changed })),
+        }
+      } catch (error) {
+        throw new Error(errorText(error))
+      }
+    },
+  })
+
+  return [map, read, zoom, check, diff]
 }

@@ -2,6 +2,10 @@ import type { NormBox, PxBox } from './coords.js';
 export interface RegistryRegion {
     id: number;
     label: string;
+    /** Verbatim visible text, when the model reported one. */
+    text?: string;
+    /** Model's self-reported certainty (0-1), when reported. */
+    confidence?: number;
     /** 0-1000 of the original image. */
     norm: NormBox;
 }

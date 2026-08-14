@@ -11,6 +11,10 @@ import { normalizedAdapter, type NormBox } from './coords.js'
 export interface ParsedElement {
   id: number
   label: string
+  /** Verbatim visible text, when the model reported one. */
+  text?: string
+  /** Model's self-reported certainty (0-1), when reported. */
+  confidence?: number
   /** 0-1000 of the model's view space. */
   norm: NormBox
 }
@@ -90,7 +94,7 @@ export function parseElements(text: string, maxItems: number, viewDims: { width:
   const items = extractItems(text)
   if (items === null) throw new BboxError('vision API did not return a parseable element inventory')
   const view = { viewBox: { x1: 0, y1: 0, x2: viewDims.width, y2: viewDims.height }, viewDims }
-  const cleaned: Array<{ label: string; norm: NormBox }> = []
+  const cleaned: Array<{ label: string; text?: string; confidence?: number; norm: NormBox }> = []
   for (const item of items) {
     if (item === null || typeof item !== 'object') continue
     const record = item as Record<string, unknown>
@@ -104,13 +108,17 @@ export function parseElements(text: string, maxItems: number, viewDims: { width:
     const rawLabel = LABEL_KEYS.map((key) => record[key]).find((value): value is string => typeof value === 'string')
     const label = (rawLabel ?? 'unclear element').trim().replace(/\s+/g, ' ')
     if (!label) continue
+    const rawText = typeof record.text === 'string' ? record.text.trim().replace(/\s+/g, ' ') : undefined
+    const rawConfidence = typeof record.confidence === 'number' && Number.isFinite(record.confidence) ? Math.max(0, Math.min(1, record.confidence)) : undefined
     // IoU dedup: near-duplicate boxes merge, keeping the more informative label.
     const duplicate = cleaned.find((existing) => iou(existing.norm, norm) >= 0.85)
     if (duplicate) {
       if (label.length > duplicate.label.length) duplicate.label = label
+      if (rawText && (!duplicate.text || rawText.length > duplicate.text.length)) duplicate.text = rawText
+      if (rawConfidence !== undefined && (duplicate.confidence === undefined || rawConfidence > duplicate.confidence)) duplicate.confidence = rawConfidence
       continue
     }
-    cleaned.push({ label, norm })
+    cleaned.push({ label, norm, ...(rawText !== undefined ? { text: rawText } : {}), ...(rawConfidence !== undefined ? { confidence: rawConfidence } : {}) })
   }
   // Reading order: top-to-bottom, then left-to-right by box center.
   cleaned.sort((a, b) => {

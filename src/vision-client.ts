@@ -10,6 +10,12 @@
 
 export type VisionTask = 'map' | 'read' | 'zoom' | 'check'
 
+export interface VisionEndpoint {
+  apiKey: string
+  baseURL: string
+  model: string
+}
+
 export interface VisionConfig {
   apiKey: string
   baseURL: string
@@ -20,6 +26,8 @@ export interface VisionConfig {
   modelRead: string
   modelZoom: string
   modelCheck: string
+  /** Ordered fallback endpoints, tried after the primary per task. */
+  chain: VisionEndpoint[]
   lang: string
   timeoutMs: number
 }
@@ -82,14 +90,33 @@ function contentText(content: unknown): string {
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
 
+function endpointList(config: VisionConfig, task: VisionTask): VisionEndpoint[] {
+  const primary: VisionEndpoint = { apiKey: config.apiKey, baseURL: config.baseURL, model: resolveModel(config, task) }
+  const entries = [primary, ...config.chain.filter((entry) => entry.baseURL && entry.model)]
+  // A chain entry without its own key inherits the primary's.
+  return entries.map((entry) => ({ ...entry, apiKey: entry.apiKey || config.apiKey }))
+}
+
 export async function callVision(config: VisionConfig, options: VisionCallOptions): Promise<string> {
   assertConfigured(config, options.task)
-  const baseURL = config.baseURL.replace(/\/+$/, '')
-  const model = resolveModel(config, options.task)
   const useJsonMode = options.jsonMode === true
   const temperature = useJsonMode || options.deterministic === true || options.task === 'map' || options.task === 'check' ? 0 : undefined
+  const failures: string[] = []
+  for (const endpoint of endpointList(config, options.task)) {
+    try {
+      return await callEndpoint(endpoint, config.timeoutMs, options, temperature, useJsonMode)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      failures.push(`${endpoint.model}@${endpoint.baseURL}: ${message}`)
+    }
+  }
+  throw new VisionError(`all ${failures.length} vision endpoint(s) failed:\n- ${failures.join('\n- ')}`)
+}
+
+async function callEndpoint(endpoint: VisionEndpoint, timeoutMs: number, options: VisionCallOptions, temperature: number | undefined, useJsonMode: boolean): Promise<string> {
+  const baseURL = endpoint.baseURL.replace(/\/+$/, '')
   const payload: Record<string, unknown> = {
-    model,
+    model: endpoint.model,
     messages: [
       {
         role: 'user',
@@ -104,7 +131,7 @@ export async function callVision(config: VisionConfig, options: VisionCallOption
   if (!useJsonMode && options.maxTokens !== undefined) payload.max_tokens = options.maxTokens
 
   for (let attempt = 0; ; attempt++) {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` }
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', Authorization: `Bearer ${endpoint.apiKey}` }
     if (useJsonMode && attempt < 1) payload.response_format = { type: 'json_object' }
     else delete payload.response_format
     try {
@@ -112,7 +139,7 @@ export async function callVision(config: VisionConfig, options: VisionCallOption
         method: 'POST',
         headers,
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(config.timeoutMs),
+        signal: AbortSignal.timeout(timeoutMs),
       })
       if (!response.ok) {
         // Some endpoints reject response_format outright: retry once without it.
@@ -120,17 +147,17 @@ export async function callVision(config: VisionConfig, options: VisionCallOption
           await new Promise((resolve) => setTimeout(resolve, 500))
           continue
         }
-        const body = (await response.text()).slice(0, 400).replace(/\r/g, ' ').replace(/\n/g, ' ').replaceAll(config.apiKey, '<redacted>')
+        const body = (await response.text()).slice(0, 400).replace(/\r/g, ' ').replace(/\n/g, ' ').replaceAll(endpoint.apiKey, '<redacted>')
         if (RETRYABLE_STATUS.has(response.status) && attempt < 2) {
           await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt))
           continue
         }
-        throw new VisionError(`vision API HTTP ${response.status}: ${body}`)
+        throw new VisionError(`HTTP ${response.status}: ${body}`)
       }
       const data: unknown = await response.json()
       const record = data as { choices?: Array<{ message?: { content?: unknown } }> }
       const answer = contentText(record.choices?.[0]?.message?.content)
-      if (!answer) throw new VisionError('vision API returned an empty answer')
+      if (!answer) throw new VisionError('empty answer')
       return answer
     } catch (error) {
       if (error instanceof VisionError) throw error
@@ -139,7 +166,7 @@ export async function callVision(config: VisionConfig, options: VisionCallOption
         continue
       }
       const reason = error instanceof Error ? error.message : String(error)
-      throw new VisionError(`vision API network error: ${reason}`)
+      throw new VisionError(`network error: ${reason}`)
     }
   }
 }

@@ -9,6 +9,13 @@ export interface Config {
     modelMap: string;
     modelRead: string;
     modelZoom: string;
+    modelCheck: string;
+    /** Ordered fallback endpoints tried after the primary (per task). */
+    chain: Array<{
+        apiKey: string;
+        baseURL: string;
+        model: string;
+    }>;
     lang: string;
     timeoutMs: number;
     maxEdge: number;

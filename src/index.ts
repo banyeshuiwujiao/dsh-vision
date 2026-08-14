@@ -31,10 +31,39 @@ export interface Config {
   modelMap: string
   modelRead: string
   modelZoom: string
+  modelCheck: string
+  /** Ordered fallback endpoints tried after the primary (per task). */
+  chain: Array<{ apiKey: string; baseURL: string; model: string }>
   lang: string
   timeoutMs: number
   maxEdge: number
 }
+
+function parseFallbacksEnv(): Array<{ apiKey: string; baseURL: string; model: string }> {
+  const raw = process.env.VISION_FALLBACKS
+  if (!raw) return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter((entry): entry is Record<string, unknown> => entry !== null && typeof entry === 'object')
+      .map((entry) => ({
+        apiKey: typeof entry.apiKey === 'string' ? entry.apiKey : '',
+        baseURL: typeof entry.baseURL === 'string' ? entry.baseURL : '',
+        model: typeof entry.model === 'string' ? entry.model : '',
+      }))
+  } catch {
+    return []
+  }
+}
+
+const ChainSchema = Schema.array(
+  Schema.object({
+    apiKey: Schema.string().default(''),
+    baseURL: Schema.string().required(),
+    model: Schema.string().required(),
+  }),
+)
 
 export const Config: Schema<Config> = Schema.object({
   apiKey: Schema.string().default(process.env.VISION_API_KEY ?? ''),
@@ -43,6 +72,8 @@ export const Config: Schema<Config> = Schema.object({
   modelMap: Schema.string().default(process.env.VISION_MODEL_MAP ?? ''),
   modelRead: Schema.string().default(process.env.VISION_MODEL_READ ?? ''),
   modelZoom: Schema.string().default(process.env.VISION_MODEL_ZOOM ?? ''),
+  modelCheck: Schema.string().default(process.env.VISION_MODEL_CHECK ?? ''),
+  chain: ChainSchema.default(parseFallbacksEnv()),
   lang: Schema.string().default(process.env.VISION_LANG ?? 'zh'),
   timeoutMs: Schema.number().default(180000),
   maxEdge: Schema.number().default(2048),
@@ -58,7 +89,8 @@ export function apply(ctx: Context, config: Config) {
       modelMap: config.modelMap,
       modelRead: config.modelRead,
       modelZoom: config.modelZoom,
-      modelCheck: '',
+      modelCheck: config.modelCheck,
+      chain: config.chain,
       lang: config.lang,
       timeoutMs: config.timeoutMs,
     },

@@ -6,5 +6,12 @@ export interface ToolDeps {
     memory: VisualMemory;
     maxEdge: number;
 }
+export interface Verdict {
+    claim: string;
+    verdict: 'supported' | 'contradicted' | 'unverifiable';
+    reason: string;
+}
+/** Tolerant parse of the vision_check verdict reply (fences, wrapper keys). */
+export declare function parseVerdicts(text: string, claims: string[]): Verdict[];
 /** Generic object output schema with exactly the given properties. */
 export declare function buildTools(deps: ToolDeps): ToolDefinition[];

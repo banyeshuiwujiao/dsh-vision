@@ -24,15 +24,23 @@ const config = {
   maxEdge: 2048,
 }
 
-test('apply registers exactly the three v1 tools', () => {
+test('apply registers exactly the five v1.1 tools', () => {
   const { ctx, registeredTools } = stubContext({ withSkills: true })
   apply(ctx, config)
   assert.equal(name, 'dsh-vision')
-  assert.deepEqual(registeredTools.map((tool) => tool.name).sort(), ['vision_map', 'vision_read', 'vision_zoom'])
+  assert.deepEqual(registeredTools.map((tool) => tool.name).sort(), ['vision_check', 'vision_diff', 'vision_map', 'vision_read', 'vision_zoom'])
+  const validArgs = {
+    vision_map: { image: 'x.png' },
+    vision_read: { images: ['x.png'], mode: 'ask', question: 'q' },
+    vision_zoom: { image: 'x.png', question: 'q', ref: '1' },
+    vision_check: { image: 'x.png', claims: ['a'] },
+    vision_diff: { a: 'a.png', b: 'b.png' },
+  }
   for (const tool of registeredTools) {
     assert.equal(typeof tool.execute, 'function')
     assert.equal(typeof tool.output.render, 'function')
     assert.ok(typeof tool.description === 'string' && tool.description.length > 0)
+    assert.equal(tool.isConcurrencySafe(validArgs[tool.name]), true, `${tool.name} must be concurrency-safe`)
   }
 })
 

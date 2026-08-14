@@ -1,4 +1,9 @@
 export type VisionTask = 'map' | 'read' | 'zoom' | 'check';
+export interface VisionEndpoint {
+    apiKey: string;
+    baseURL: string;
+    model: string;
+}
 export interface VisionConfig {
     apiKey: string;
     baseURL: string;
@@ -9,6 +14,8 @@ export interface VisionConfig {
     modelRead: string;
     modelZoom: string;
     modelCheck: string;
+    /** Ordered fallback endpoints, tried after the primary per task. */
+    chain: VisionEndpoint[];
     lang: string;
     timeoutMs: number;
 }
