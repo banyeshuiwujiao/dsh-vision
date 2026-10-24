@@ -463,10 +463,10 @@ export function buildTools(deps: ToolDeps): ToolDefinition[] {
   const diff = defineTool({
     name: 'vision_diff',
     description:
-      'Diff two PNG images pixel by pixel (local, deterministic — no vision API) and return the overall difference percentage plus the worst differing regions as boxes. The iteration tool: after changing a page or UI, diff the new screenshot against the reference to measure how close it is, then zoom into the worst regions. A small badge or shifted pixel is a rounding error to a vision model and exact to this tool — diff first to get the boxes, then vision_read/vision_zoom those boxes to read what the change actually is.',
+      'Diff two images pixel by pixel (local, deterministic, no vision API calls) and return the overall difference percentage plus the worst differing regions as boxes. The iteration tool: after changing a page or UI, diff the new screenshot against the reference to measure how close it is, then zoom into the worst regions. A small badge or shifted pixel is a rounding error to a vision model and exact to this tool — diff first to get the boxes, then vision_read/vision_zoom those boxes to read what the change actually is.',
     parameters: {
-      a: { type: 'string', required: true, description: 'Absolute PNG path of the first image (e.g. the reference).' },
-      b: { type: 'string', required: true, description: 'Absolute PNG path of the second image (e.g. the current screenshot).' },
+      a: { type: 'string', required: true, description: 'Absolute path of the first image in any decodable format (e.g. the reference PNG or JPEG).' },
+      b: { type: 'string', required: true, description: 'Absolute path of the second image in any decodable format (e.g. the current screenshot).' },
       tolerance: { type: 'integer', description: 'Per-channel difference that counts a pixel as changed (default 8).' },
     },
     output: {
